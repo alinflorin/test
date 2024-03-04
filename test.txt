@@ -1,0 +1,216 @@
+package org.example.client;
+ 
+import com.hazelcast.client.HazelcastClient;
+import com.hazelcast.client.config.ClientConfig;
+import com.hazelcast.config.SSLConfig;
+import com.hazelcast.core.HazelcastInstance;
+import java.util.Properties;
+ 
+public class Main {
+    public static void main(String[] args) throws Exception {
+        ClientConfig config = new ClientConfig();
+        config.setClusterName("hello-world");
+ 
+        Properties clientSslProps = new Properties();
+        clientSslProps.setProperty("protocol", "TLSv1.2");
+        clientSslProps.setProperty("keyStore", Main.class.getClassLoader().getResource("client.keystore").getPath());
+        clientSslProps.setProperty("keyStorePassword", "password");
+        clientSslProps.setProperty("keyStoreType", "JKS");
+ 
+        clientSslProps.setProperty("trustStore", Main.class.getClassLoader().getResource("client.truststore").getPath());
+        clientSslProps.setProperty("trustStorePassword", "password");
+        clientSslProps.setProperty("trustStoreType", "JKS");
+ 
+        config.getNetworkConfig().setSSLConfig(new SSLConfig().setEnabled(true).setProperties(clientSslProps));
+        config.getNetworkConfig().addAddress("localhost");
+ 
+        HazelcastInstance hz = HazelcastClient.newHazelcastClient(config);
+ 
+        hz.getMap("test").put("test", "test");
+        String val = (String)hz.getMap("test").get("test");
+        System.out.println(val);
+        hz.shutdown();
+    }
+}
+ 
+ 
+ 
+ 
+ 
+ 
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+ 
+    <groupId>org.example</groupId>
+    <artifactId>client</artifactId>
+    <version>1.0-SNAPSHOT</version>
+ 
+    <repositories>
+        <repository>
+            <id>hz</id>
+            <name>hzz</name>
+            <url>https://repository.hazelcast.com/release/</url>
+        </repository>
+    </repositories>
+ 
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+    <dependencies>
+        <!-- https://mvnrepository.com/artifact/com.hazelcast/hazelcast-enterprise -->
+        <dependency>
+            <groupId>com.hazelcast</groupId>
+            <artifactId>hazelcast-enterprise</artifactId>
+            <version>5.3.6</version>
+        </dependency>
+    </dependencies>
+</project>
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+package org.example.server;
+import com.hazelcast.config.Config;
+ 
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import javax.net.ssl.*;
+import java.io.*;
+import java.net.*;
+import java.security.*;
+ 
+public class Main {
+    public static void main(String[] args) throws Exception {
+        int sslPort = 5701; // default HZ TCP port is now our SSL port - client connects to this one
+        int tcpPort = 6701; // this is the new HZ listening port, TCP only
+ 
+        Config serverConfig = new Config();
+        serverConfig.setClusterName("hello-world");
+        serverConfig.getNetworkConfig().setPort(tcpPort);
+        serverConfig.getNetworkConfig().getInterfaces().clear();
+        serverConfig.getNetworkConfig().getInterfaces().addInterface("127.0.0.1");
+ 
+        HazelcastInstance hz = Hazelcast.newHazelcastInstance(serverConfig);
+ 
+        // Load server keystore
+        String keystoreFile = Main.class.getClassLoader().getResource("server.keystore").getPath();
+        String truststoreFile = Main.class.getClassLoader().getResource("server.truststore").getPath();
+        char[] keystorePassword = "password".toCharArray(); // Change this to your actual keystore password
+        char[] truststorePassword = "password".toCharArray(); // Change this to your actual truststore password
+ 
+        KeyStore keystore = KeyStore.getInstance("JKS");
+        keystore.load(new FileInputStream(keystoreFile), keystorePassword);
+ 
+        // Load server truststore
+        KeyStore truststore = KeyStore.getInstance("JKS");
+        truststore.load(new FileInputStream(truststoreFile), truststorePassword);
+ 
+        // Set up key manager factory
+        KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        keyManagerFactory.init(keystore, keystorePassword);
+ 
+        // Set up trust manager factory
+        TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        trustManagerFactory.init(truststore);
+ 
+        // Set up SSL context
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(keyManagerFactory.getKeyManagers(), trustManagerFactory.getTrustManagers(), new SecureRandom());
+ 
+ 
+        // Set up SSL parameters to require client authentication
+        SSLParameters sslParamz = new SSLParameters();
+        sslParamz.setNeedClientAuth(true);
+ 
+        // Create SSL server socket
+        SSLServerSocketFactory sslServerSocketFactory = sslContext.getServerSocketFactory();
+        SSLServerSocket sslServerSocket = (SSLServerSocket) sslServerSocketFactory.createServerSocket(sslPort);
+ 
+        // Set SSL parameters
+        sslServerSocket.setSSLParameters(sslParamz);
+ 
+        System.out.println("SSL Forwarder listening on port " + sslPort);
+ 
+        // Accept incoming SSL connections
+        while (true) {
+            SSLSocket sslSocket = (SSLSocket) sslServerSocket.accept();
+            System.out.println("Accepted connection from " + sslSocket.getInetAddress());
+ 
+            // Set up TCP connection to forward decrypted traffic
+            Socket tcpSocket = new Socket("localhost", tcpPort);
+            System.out.println("Connected to TCP port " + tcpPort);
+ 
+            // Set up streams for SSL and TCP connections
+            InputStream sslInput = sslSocket.getInputStream();
+            OutputStream sslOutput = sslSocket.getOutputStream();
+            InputStream tcpInput = tcpSocket.getInputStream();
+            OutputStream tcpOutput = tcpSocket.getOutputStream();
+ 
+            // Forward SSL traffic to TCP port
+            Thread sslToTcp = new Thread(() -> {
+                try {
+                    byte[] buffer = new byte[4096];
+                    int bytesRead;
+                    while ((bytesRead = sslInput.read(buffer)) != -1) {
+                        tcpOutput.write(buffer, 0, bytesRead);
+                        tcpOutput.flush();
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            });
+            sslToTcp.start();
+ 
+            // Forward TCP traffic to SSL port
+            Thread tcpToSsl = new Thread(() -> {
+                try {
+                    byte[] buffer = new byte[4096];
+                    int bytesRead;
+                    while ((bytesRead = tcpInput.read(buffer)) != -1) {
+                        sslOutput.write(buffer, 0, bytesRead);
+                        sslOutput.flush();
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            });
+            tcpToSsl.start();
+        }
+    }
+}
+ 
+ 
+ 
+ 
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+ 
+    <groupId>org.example</groupId>
+    <artifactId>server</artifactId>
+    <version>1.0-SNAPSHOT</version>
+ 
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>com.hazelcast</groupId>
+            <artifactId>hazelcast</artifactId>
+            <version>5.3.6</version>
+        </dependency>
+ 
+    </dependencies>
+</project>
